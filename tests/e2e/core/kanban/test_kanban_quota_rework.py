@@ -60,6 +60,7 @@ def test_repeated_quota_then_review_rework_keeps_one_worktree(tmp_path: Path):
         tid = board.create("recovery cycle", "--workspace", f"worktree:{repo}")
         model.tid = tid
         try:
+            worktree = None
             for tick in range(1, 10):
                 model.tick = tick
                 result = board.dispatch()
@@ -72,6 +73,11 @@ def test_repeated_quota_then_review_rework_keeps_one_worktree(tmp_path: Path):
                 assert task["consecutive_failures"] == 0, board.diag(tid)
                 if task["status"] == "done":
                     break
+                current_workspace = Path(task["workspace_path"])
+                assert current_workspace.is_dir() and (current_workspace / ".git").is_file()
+                if worktree is not None:
+                    assert current_workspace == worktree
+                worktree = current_workspace
                 if any(g.get("reason") == "rate_limit_cooldown" for g in result.get("respawn_guarded", [])):
                     # Dispatch is a separate process on each pass; reopen persisted state after cooldown.
                     ended = board.runs(tid)[-1]["ended_at"]
@@ -84,7 +90,30 @@ def test_repeated_quota_then_review_rework_keeps_one_worktree(tmp_path: Path):
             assert len(board.events(tid, "changes_requested")) == 1
             assert len(board.events(tid, "commented")) == 1
             assert not board.events(tid, "gave_up")
-            worktree = Path(board.task(tid)["workspace_path"])
-            assert worktree.is_dir() and (worktree / ".git").is_file()
+            assert worktree is not None
+        finally:
+            board.kill_workers()
+
+
+def test_invalid_provider_credentials_remain_sticky_blocked(tmp_path: Path):
+    requests = []
+
+    def reject(request):
+        requests.append(request)
+        return Error(status=401, message="Incorrect API key provided", retry_after=0)
+
+    with FakeLLMServer(reject) as server:
+        board = Board(tmp_path, server.base_url)
+        tid = board.create("invalid credentials")
+        try:
+            result = board.dispatch()
+            assert [s["task_id"] for s in result["spawned"]] == [tid]
+            pid = board.events(tid, "spawned")[-1]["payload"]["pid"]
+            board.wait_worker_exit(tid, int(pid))
+            board.dispatch()
+            assert requests
+            assert board.task(tid)["status"] == "blocked", board.diag(tid)
+            assert board.events(tid, "gave_up"), board.diag(tid)
+            assert not board.events(tid, "rate_limited"), board.diag(tid)
         finally:
             board.kill_workers()
