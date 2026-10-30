@@ -1,0 +1,38 @@
+name: Quota recovery
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quota-recovery:
+    name: quota-recovery
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: ./.github/actions/setup-pm
+        id: pm
+        with:
+          test-environment: 'true'
+      - name: Focused lifecycle and live-process tests
+        env:
+          HERMES_PYTHON: ${{ steps.pm.outputs.python-path }}
+          HERMES_TEST_FILE_RETRIES: '0'
+        run: >-
+          scripts/run_tests.sh
+          tests/hermes_cli/test_kanban_quota_handoff.py
+          tests/hermes_cli/test_kanban_handoff_order.py
+          tests/hermes_cli/test_kanban_review_lifecycle.py
+          tests/hermes_cli/test_kanban_db.py
+          tests/e2e/core/kanban/test_kanban_rate_limit_review.py
+      - name: Check source health
+        env:
+          HERMES_PYTHON: ${{ steps.pm.outputs.python-path }}
+        run: |
+          git diff --check
+          python scripts/check
