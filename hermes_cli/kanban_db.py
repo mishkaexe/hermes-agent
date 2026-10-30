@@ -3443,7 +3443,6 @@ def request_changes(
         if implementer is None:
             return False, "review handoff has no valid implementer provenance"
         reviewer = _canonical_assignee(_nonblank_str(task_row["assignee"]))
-
         new_status = _landing_status_after_parents(conn, task_id)
         # consecutive_failures deliberately PRESERVED: a review transition is
         # not evidence the pathology cleared; only complete_task resets it.
@@ -3473,6 +3472,7 @@ def request_changes(
                 "implementer": implementer,
                 "reviewer": reviewer,
                 "status": new_status,
+                "comment_watermark": conn.execute("SELECT COALESCE(MAX(id), 0) FROM task_comments WHERE task_id = ?", (task_id,)).fetchone()[0],
             },
             run_id=run_id,
         )
