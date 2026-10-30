@@ -17,11 +17,15 @@ def active_pr_guard(conn, task_id, now):
         conn, "task_events", task_id, newest,
         "AND kind IN ('assigned', 'changes_requested', 'review_reopened')",
         cols=", kind, payload", strict=True)
-    if any(dispatch._is_handoff_event(e["kind"], e["payload"]) for _, e in events):
-        return None
+    assignee = conn.execute("SELECT assignee FROM tasks WHERE id = ?", (task_id,)).fetchone()[0]
+    for _, event in events:
+        data = kb._json_or(event["payload"], {})
+        target = "assignee" if event["kind"] == "assigned" else "implementer"
+        if (isinstance(data, dict) and assignee and data.get(target) == assignee
+                and dispatch._is_handoff_event(event["kind"], event["payload"])):
+            return None
     # The handoff write lock captures a comment-table watermark. It proves
     # ordering on a tied second without comparing unrelated table sequences.
-    assignee = conn.execute("SELECT assignee FROM tasks WHERE id = ?", (task_id,)).fetchone()[0]
     for timestamp, event in dispatch._rows_since(
             conn, "task_events", task_id, newest,
             "AND kind = 'changes_requested'", cols=", payload"):
