@@ -29,6 +29,8 @@ def active_pr_guard(conn, task_id, now):
         if (timestamp == newest and isinstance(data, dict)
                 and type(data.get("comment_watermark")) is int
                 and data["comment_watermark"] >= max(cid for _, cid in comments)
+                and conn.execute("SELECT 1 FROM task_comments WHERE task_id = ? AND id = ?",
+                                 (task_id, data["comment_watermark"])).fetchone()
                 and assignee and data.get("implementer") == assignee):
             return None
     return "active_pr"
