@@ -15,6 +15,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
       - uses: ./.github/actions/setup-pm
         id: pm
         with:
@@ -30,6 +31,7 @@ jobs:
           tests/hermes_cli/test_kanban_review_lifecycle.py
           tests/hermes_cli/test_kanban_db.py
           tests/e2e/core/kanban/test_kanban_rate_limit_review.py
+          tests/e2e/core/kanban/test_kanban_quota_rework.py
       - name: Check source health
         env:
           HERMES_PYTHON: ${{ steps.pm.outputs.python-path }}
