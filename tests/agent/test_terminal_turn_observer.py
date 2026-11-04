@@ -1,6 +1,8 @@
 """Provider failures must close the started turn for plugin observers."""
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from hermes_cli.plugins import PluginContext, PluginManager, PluginManifest
 from run_agent import AIAgent
 
@@ -39,3 +41,26 @@ def test_terminal_provider_error_notifies_end():
     assert ends[0]["completed"] is False
     assert ends[0]["turn_id"] != ends[1]["turn_id"]
     assert not [payload for name, payload in events if name == "post"]
+
+
+def test_keyboard_interrupt_closes_started_turn_without_swallowing_exception():
+    manager = PluginManager()
+    manager._discovered = True
+    ctx = PluginContext(PluginManifest(name="recorder", key="recorder"), manager)
+    events = []
+    ctx.register_hook("on_session_end", lambda **kw: events.append(kw))
+    with (patch("hermes_cli.plugins.get_plugin_manager", return_value=manager),
+          patch("model_tools.get_tool_definitions", return_value=[]),
+          patch("model_tools.check_toolset_requirements", return_value={}),
+          patch("agent.process_bootstrap.OpenAI", return_value=MagicMock())):
+        agent = AIAgent(api_key="test-key-1234567890", provider="openrouter",
+                        base_url="https://openrouter.ai/api/v1", model="test-model",
+                        quiet_mode=True, skip_context_files=True, skip_memory=True)
+        agent._interruptible_api_call = MagicMock(side_effect=KeyboardInterrupt)
+        with pytest.raises(KeyboardInterrupt):
+            agent.run_conversation("hello")
+    assert len(events) == 1
+    assert events[0]["session_id"] == agent.session_id
+    assert events[0]["interrupted"] is True
+    assert events[0]["completed"] is False
+    assert events[0]["failed"] is False

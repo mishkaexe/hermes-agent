@@ -1840,6 +1840,19 @@ def run_conversation(
                 title_user_message=title_user_message,
                 prelude=prelude,
             )
+        except KeyboardInterrupt:
+            if (agent._lifecycle_turn_started and not agent._lifecycle_turn_ended
+                    and not getattr(agent, "_persist_disabled", False)):
+                from agent.turn_finalizer import _invoke_hook_safely
+                agent._lifecycle_turn_ended = True
+                _invoke_hook_safely(
+                    "on_session_end", logger,
+                    session_id=agent.session_id, task_id=agent._current_task_id,
+                    turn_id=agent._current_turn_id, completed=False, failed=False,
+                    interrupted=True, turn_exit_reason="interrupted",
+                    model=agent.model, platform=getattr(agent, "platform", None) or "",
+                )
+            raise
         finally:
             end_voice_turn_route(agent)
     settle_held_final(agent, result)
