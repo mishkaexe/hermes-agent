@@ -53,12 +53,14 @@ def establish_launch_fence(authority, ref, row):
     return authority.db._execute_write(write)
 
 
-def authorize_launch(authority, ref, row):
+def authorize_launch(authority, ref, row, *, required=False):
     """Persist the launch permit before scheduling process acquisition; refuse stale permits."""
     def write(conn):
         _epoch(conn, authority.epoch)
         saved = conn.execute('SELECT value FROM state_meta WHERE key=?', (POLICY_PREFIX + ref.session_id,)).fetchone()
         if saved is None or json.loads(saved[0]).get('policy', {}).get('source') != 'kanban':
+            if required or conn.execute('SELECT 1 FROM state_meta WHERE key=?', (PREFIX + row['admission_id'],)).fetchone():
+                raise RuntimeStoreError('storage_unavailable')
             return
         admission = _admission(conn, row['admission_id'])
         key = PREFIX + row['admission_id']
@@ -84,10 +86,12 @@ def retain_verified_identity(conn, authority, admission, target, pid, birth):
     """Commit verified interpreter identity in the reservation's own transaction."""
     owner = admission['target_session_id']
     saved = conn.execute('SELECT value FROM state_meta WHERE key=?', (POLICY_PREFIX + owner,)).fetchone()
-    if saved is None or json.loads(saved[0]).get('policy', {}).get('source') != 'kanban':
-        return
     key = PREFIX + admission['admission_id']
     stored = conn.execute('SELECT value FROM state_meta WHERE key=?', (key,)).fetchone()
+    if saved is None or json.loads(saved[0]).get('policy', {}).get('source') != 'kanban':
+        if stored is not None:
+            raise RuntimeStoreError('storage_unavailable')
+        return
     if stored is None:
         raise RuntimeStoreError('stale_generation')
     record = json.loads(stored[0])

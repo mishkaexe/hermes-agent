@@ -595,7 +595,9 @@ async def _spawn_registered_worker(authority, ref, row):
         log_path = worker_log_path(authority.profile_id)
         from gateway.session_kanban_launch import authorize_launch
         from gateway.session_runtime_workers import tracked_write
-        await tracked_write(authority, partial(authorize_launch, authority, ref, row))
+        policy = managed_policy(authority, ref)
+        await tracked_write(authority, partial(authorize_launch, authority, ref, row,
+                                              required=policy is not None and policy.source == 'kanban'))
         process = await acquire_process(subprocess.Popen, [sys.executable, '-m', 'agent.managed_worker'],
             cwd=cwd, stdin=subprocess.PIPE, env=env, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL if log_path is None else subprocess.PIPE, **WORKER_POPEN)

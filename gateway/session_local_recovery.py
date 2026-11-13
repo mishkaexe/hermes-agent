@@ -453,7 +453,9 @@ def recover_local_sessions(authority, *, schedule=False):
             pending = list_session_admissions(authority.db, session_id=sid)
             if any(row['status'] == 'unknown' for row in pending):
                 continue  # the drain pauses on it until its user's Discard
-            if schedule and pending:
+            receipt = local_receipt(authority.db, sid)
+            finite_recovery = receipt.get('policy', {}).get('source') == 'kanban'
+            if schedule and (pending or finite_recovery):
                 authority._schedule(ref)
             orphans.append(sid)
         except (_ReceiptRefused, _CatchUpPending):
