@@ -4,7 +4,147 @@ from types import MethodType
 
 import pytest
 
-from tests.gateway.test_kanban_finite_admission import _CONFIG, kanban_owner  # noqa: F401
+from tests.gateway.test_kanban_finite_admission import _CONFIG
+
+pytest_plugins = ('tests.gateway.test_kanban_finite_admission',)
+
+
+@pytest.mark.asyncio
+async def test_finite_attempt_has_durable_no_launch_fence_before_ingress(kanban_owner, monkeypatch):
+    import json
+    from gateway.session_contract import SessionRef
+    from gateway.session_kanban import run_task
+
+    owner = kanban_owner(_CONFIG)
+    authority = owner.authority
+    observed = []
+
+    async def execute(authority, ref, row):
+        raw = authority.db.get_meta('gateway.kanban.launch.v1:' + row['admission_id'])
+        observed.append(json.loads(raw) if raw else None)
+        raise RuntimeError('synthetic admission execution failure')
+
+    monkeypatch.setattr('gateway.session_ingress.execute_admission', execute)
+    try:
+        sid = (await run_task(owner.connection, owner.params))['session_id']
+        await authority._drain(SessionRef(authority.profile_id, sid))
+        assert len(observed) == 1
+        assert observed[0] is not None
+        assert observed[0]['state'] == 'not_launched'
+        assert observed[0]['session_id'] == sid
+    finally:
+        await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_spawn_is_authorized_durably_before_process_acquisition(kanban_owner, monkeypatch):
+    import json
+    from gateway.session_contract import SessionRef
+    from gateway.session_kanban import run_task
+    from gateway.session_managed_worker import _spawn_registered_worker
+
+    owner = kanban_owner(_CONFIG)
+    observed = []
+
+    async def acquire(*args, **kwargs):
+        raw = owner.authority.db.get_meta('gateway.kanban.launch.v1:' + admission_id[0])
+        observed.append(json.loads(raw)['state'])
+        raise RuntimeError('synthetic acquisition failure')
+
+    admission_id = []
+    async def execute(authority, ref, row):
+        admission_id.append(row['admission_id'])
+        return await _spawn_registered_worker(authority, ref, row)
+
+    monkeypatch.setattr('gateway.session_ingress.execute_admission', execute)
+    monkeypatch.setattr('gateway.session_worker_spawn.acquire_process', acquire)
+    try:
+        sid = (await run_task(owner.connection, owner.params))['session_id']
+        await owner.authority._drain(SessionRef(owner.authority.profile_id, sid))
+        assert observed == ['launch_requested']
+        assert owner.authority.db.get_session(sid)['ended_at'] is None
+    finally:
+        await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_pending_acquisition_without_worker_reservation_cannot_finalize(kanban_owner, monkeypatch):
+    from gateway.session_contract import SessionRef
+    from gateway.session_kanban import run_task
+    from gateway.session_kanban_finalize import end_unlaunched_attempt
+    from gateway.session_managed_worker import _spawn_registered_worker
+
+    owner = kanban_owner(_CONFIG)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def acquire(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        raise RuntimeError('synthetic late acquisition failure')
+
+    async def execute(authority, ref, row):
+        return await _spawn_registered_worker(authority, ref, row)
+
+    monkeypatch.setattr('gateway.session_ingress.execute_admission', execute)
+    monkeypatch.setattr('gateway.session_worker_spawn.acquire_process', acquire)
+    try:
+        sid = (await run_task(owner.connection, owner.params))['session_id']
+        drain = asyncio.create_task(owner.authority._drain(SessionRef(owner.authority.profile_id, sid)))
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        assert end_unlaunched_attempt(owner.authority, sid) is None
+        assert owner.authority.db.get_session(sid)['ended_at'] is None
+        release.set()
+        await asyncio.wait_for(drain, timeout=5)
+        assert end_unlaunched_attempt(owner.authority, sid) is None
+        assert owner.authority.db.get_session(sid)['ended_at'] is None
+    finally:
+        release.set()
+        await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_verified_interpreter_identity_is_retained_with_reservation(kanban_owner, monkeypatch):
+    import json
+    import os
+    import subprocess
+    import sys
+    import psutil
+    from gateway.session_contract import SessionRef
+    from gateway.session_kanban import run_task
+    from gateway.session_kanban_launch import authorize_launch
+    from gateway.session_worker_reservation import reserve_admission_worker
+    from hermes_cli.process_identity import worker_birth
+
+    owner = kanban_owner(_CONFIG)
+    observed = []
+
+    async def execute(authority, ref, row):
+        await asyncio.to_thread(authorize_launch, authority, ref, row)
+        process = await asyncio.to_thread(subprocess.Popen, [sys.executable, '-c', 'import sys; sys.stdin.read()'],
+                                          stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            birth = worker_birth(psutil.Process(process.pid))
+            hello = {'type': 'hello', 'pid': process.pid, 'birth': birth, 'ancestors': [os.getpid()]}
+            scope = await asyncio.to_thread(reserve_admission_worker, authority, admission_id=row['admission_id'],
+                                            process=process, principal_id=row['principal_id'], hello=hello)
+            raw = authority.db.get_meta('gateway.kanban.launch.v1:' + row['admission_id'])
+            observed.append((json.loads(raw), scope['pid'], scope['birth']))
+        finally:
+            process.stdin.close()
+            await asyncio.to_thread(process.wait, timeout=5)
+        return ''
+
+    monkeypatch.setattr('gateway.session_ingress.execute_admission', execute)
+    try:
+        sid = (await run_task(owner.connection, owner.params))['session_id']
+        await owner.authority._drain(SessionRef(owner.authority.profile_id, sid))
+        assert len(observed) == 1
+        record, pid, birth = observed[0]
+        assert record['state'] == 'identified'
+        assert (record['pid'], record['birth']) == (pid, birth)
+    finally:
+        await owner.close()
 
 
 @pytest.mark.asyncio

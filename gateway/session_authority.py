@@ -1249,6 +1249,9 @@ class SessionAuthority:
             await asyncio.to_thread(cancel_background_review_for_live_turn, live.review)
         try:
             try:
+                from gateway.session_kanban_launch import establish_launch_fence
+                from gateway.session_runtime_workers import tracked_write
+                await tracked_write(self, partial(establish_launch_fence, self, ref, row))
                 return await execute_finite_admission(self, ref, row), 'completed'
             finally:
                 with live.event_stream.lock:
@@ -1295,6 +1298,8 @@ class SessionAuthority:
                 # ``rescan`` on this still-live drain, which must claim it rather than exit.
                 from gateway.session_runtime_workers import tracked_write
                 await tracked_write(self, partial(end_idle_acp_session, self, ref.session_id))
+                from gateway.session_kanban_finalize import settle_unlaunched_attempt
+                await settle_unlaunched_attempt(self, ref, live)
                 if live.rescan:
                     continue
                 from gateway.session_viewer_close import settle_viewer_close

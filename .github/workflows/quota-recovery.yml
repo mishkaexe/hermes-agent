@@ -32,6 +32,13 @@ jobs:
           tests/hermes_cli/test_kanban_db.py
           tests/e2e/core/kanban/test_kanban_rate_limit_review.py
           tests/e2e/core/kanban/test_kanban_quota_rework.py
+          tests/agent/test_terminal_turn_observer.py
+          tests/agent/test_turn_finalizer_cleanup_guard.py
+          tests/agent/test_turn_finalizer_final_response_persistence.py
+          tests/gateway/test_kanban_session_finalize.py
+          tests/gateway/test_kanban_finite_admission.py
+          tests/gateway/test_worker_admission_reservation.py
+          tests/gateway/test_managed_worker_fencing.py
       - name: Check source health
         env:
           HERMES_PYTHON: ${{ steps.pm.outputs.python-path }}
