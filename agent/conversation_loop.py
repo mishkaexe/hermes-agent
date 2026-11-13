@@ -1817,6 +1817,8 @@ def run_conversation(
 
     # Steer / redirect / interrupt set this mid-turn; the result reports whether the turn ran untouched.
     agent._turn_user_intervened = False
+    agent._lifecycle_turn_started = False
+    agent._lifecycle_turn_ended = False
     # Images attached natively to this user turn stay visible to vision_analyze for the turn, so
     # it does not embed the same pixels a second time into the same request (#76411).
     with native_turn_images(user_message):
@@ -1838,6 +1840,19 @@ def run_conversation(
                 title_user_message=title_user_message,
                 prelude=prelude,
             )
+        except KeyboardInterrupt:
+            if (agent._lifecycle_turn_started and not agent._lifecycle_turn_ended
+                    and not getattr(agent, "_persist_disabled", False)):
+                from agent.turn_finalizer import _invoke_hook_safely
+                agent._lifecycle_turn_ended = True
+                _invoke_hook_safely(
+                    "on_session_end", logger,
+                    session_id=agent.session_id, task_id=agent._current_task_id,
+                    turn_id=agent._current_turn_id, completed=False, failed=False,
+                    interrupted=True, turn_exit_reason="interrupted",
+                    model=agent.model, platform=getattr(agent, "platform", None) or "",
+                )
+            raise
         finally:
             end_voice_turn_route(agent)
     settle_held_final(agent, result)
@@ -1845,6 +1860,18 @@ def run_conversation(
     if isinstance(result, dict):
         result["user_intervened"] = bool(getattr(agent, "_turn_user_intervened", False))
     _close_durable_failed_turn(agent, result)
+    if (agent._lifecycle_turn_started and not agent._lifecycle_turn_ended
+            and not getattr(agent, "_persist_disabled", False)):
+        from agent.turn_finalizer import _invoke_hook_safely
+        agent._lifecycle_turn_ended = True
+        _invoke_hook_safely(
+            "on_session_end", logger,
+            session_id=agent.session_id, task_id=agent._current_task_id,
+            turn_id=agent._current_turn_id, completed=bool(result.get("completed")),
+            failed=bool(result.get("failed")), interrupted=bool(result.get("interrupted")),
+            turn_exit_reason=result.get("turn_exit_reason") or result.get("failure_reason") or "unknown",
+            model=agent.model, platform=getattr(agent, "platform", None) or "",
+        )
     return result
 
 

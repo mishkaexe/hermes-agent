@@ -102,6 +102,8 @@ def reserve_admission_worker(authority, *, admission_id, process, principal_id, 
         scope = dict(profile_id=authority.profile_id, session_id=sid, execution_id=execution_id,
                      generation=generation, pid=pid, birth=birth, secret=secret)
         claim = admission_fingerprint(canonical_target=sid, payload=scope | {'principal': worker_subject or principal_id})
+        from gateway.session_kanban_launch import retain_verified_identity
+        retain_verified_identity(conn, authority, admission, sid, pid, birth)
         conn.execute("INSERT INTO worker_executions(execution_id,session_id,kind,owner_epoch,generation,status,adoption_digest) "
                      "VALUES(?,?,'compute',?,?,'registered',?)",
                      (execution_id, sid, authority.epoch, generation, _secret_digest(claim)))

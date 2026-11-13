@@ -867,6 +867,7 @@ def finalize_turn(
     # Memory provider on_session_end()/shutdown_all() are NOT called here:
     # run_conversation() runs once per message; CLI/gateway own session-end cleanup.
     if not getattr(agent, "_persist_disabled", False):
+        agent._lifecycle_turn_ended = True
         _invoke_hook_safely(
             "on_session_end", logger,
             session_id=agent.session_id,
