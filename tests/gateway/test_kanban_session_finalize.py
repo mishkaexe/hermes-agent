@@ -225,26 +225,42 @@ async def test_verified_interpreter_identity_is_retained_with_reservation(kanban
     from gateway.session_contract import SessionRef
     from gateway.session_kanban import run_task
     from gateway.session_kanban_launch import authorize_launch
+    from gateway.session_kanban_finalize import settle_unlaunched_attempt
+    from gateway.session_managed_worker import ManagedWorker
     from gateway.session_worker_reservation import reserve_admission_worker
+    from gateway.run_shutdown_session_end import GatewaySessionEndMixin
+    from hermes_cli.plugins import PluginContext, PluginManager, PluginManifest
     from hermes_cli.process_identity import worker_birth
 
     owner = kanban_owner(_CONFIG)
     observed = []
+    processes = []
+    events = []
+    manager = PluginManager()
+    manager._discovered = True
+    PluginContext(PluginManifest(name='recorder', key='recorder'), manager).register_hook(
+        'on_session_finalize', lambda **kw: events.append(kw))
+    monkeypatch.setattr('hermes_cli.plugins.get_plugin_manager', lambda: manager)
+    runner = owner.runner
+    runner._FINALIZE_TIMEOUT_S = 10
+    runner._run_housekeeping_in_executor = lambda func, *args: asyncio.to_thread(func, *args)
+    runner._run_release_in_profile_scope = lambda target, args, key: target(*args)
+    runner._finalize_session_off_loop = MethodType(GatewaySessionEndMixin._finalize_session_off_loop, runner)
 
     async def execute(authority, ref, row):
         await asyncio.to_thread(authorize_launch, authority, ref, row)
         process = await asyncio.to_thread(subprocess.Popen, [sys.executable, '-c', 'import sys; sys.stdin.read()'],
-                                          stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        try:
-            birth = worker_birth(psutil.Process(process.pid))
-            hello = {'type': 'hello', 'pid': process.pid, 'birth': birth, 'ancestors': [os.getpid()]}
-            scope = await asyncio.to_thread(reserve_admission_worker, authority, admission_id=row['admission_id'],
-                                            process=process, principal_id=row['principal_id'], hello=hello)
-            raw = authority.db.get_meta('gateway.kanban.launch.v1:' + row['admission_id'])
-            observed.append((json.loads(raw), scope['pid'], scope['birth']))
-        finally:
-            process.stdin.close()
-            await asyncio.to_thread(process.wait, timeout=5)
+                                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        processes.append(process)
+        birth = worker_birth(psutil.Process(process.pid))
+        hello = {'type': 'hello', 'pid': process.pid, 'birth': birth, 'ancestors': [os.getpid()]}
+        scope = await asyncio.to_thread(reserve_admission_worker, authority, admission_id=row['admission_id'],
+                                        process=process, principal_id=row['principal_id'], hello=hello)
+        raw = authority.db.get_meta('gateway.kanban.launch.v1:' + row['admission_id'])
+        observed.append((json.loads(raw), scope['pid'], scope['birth']))
+        await settle_unlaunched_attempt(authority, ref, authority.sessions[ref.session_id])
+        assert authority.db.get_session(ref.session_id)['ended_at'] is None
+        assert not events
         return ''
 
     monkeypatch.setattr('gateway.session_ingress.execute_admission', execute)
@@ -255,8 +271,54 @@ async def test_verified_interpreter_identity_is_retained_with_reservation(kanban
         record, pid, birth = observed[0]
         assert record['state'] == 'identified'
         assert (record['pid'], record['birth']) == (pid, birth)
+        execution = owner.authority.db._read_one(
+            'SELECT status FROM worker_executions WHERE execution_id=?', ('admission-worker:' + record['admission_id'],))
+        assert execution['status'] == 'terminal'  # normal admission settlement retired this reservation
+        assert owner.authority.db.get_session(sid)['ended_at'] is None
+        assert events == []  # terminal execution does not prove the live interpreter exited
+        holder = ManagedWorker(processes[0])
+        holder.worker = (pid, birth)
+        owner.authority._managed_workers = {sid: holder}
+        processes[0].stdin.close()
+        await asyncio.to_thread(processes[0].wait, timeout=5)
+        await owner.authority._drain(SessionRef(owner.authority.profile_id, sid))
+        assert owner.authority.db.get_session(sid)['ended_at'] is None
+        assert events == []
+        await asyncio.to_thread(holder.close)
+        del owner.authority._managed_workers[sid]
+        # A denied process probe is uncertainty, not proof of disappearance.
+        with monkeypatch.context() as patch:
+            def denied(_pid):
+                raise psutil.AccessDenied(pid=_pid)
+            patch.setattr(psutil, 'Process', denied)
+            await owner.authority._drain(SessionRef(owner.authority.profile_id, sid))
+            assert owner.authority.db.get_session(sid)['ended_at'] is None
+            assert events == []
+        key = 'gateway.kanban.launch.v1:' + record['admission_id']
+        original = owner.authority.db.get_meta(key)
+        for value in (None, json.dumps(record | {'generation': record['generation'] + 1})):
+            def replace(conn):
+                if value is None:
+                    conn.execute('DELETE FROM state_meta WHERE key=?', (key,))
+                else:
+                    conn.execute('UPDATE state_meta SET value=? WHERE key=?', (value, key))
+            owner.authority.db._execute_write(replace)
+            await owner.authority._drain(SessionRef(owner.authority.profile_id, sid))
+            assert owner.authority.db.get_session(sid)['ended_at'] is None
+            assert events == []
+            owner.authority.db._execute_write(lambda conn: conn.execute(
+                'INSERT OR REPLACE INTO state_meta(key,value) VALUES(?,?)', (key, original)))
+        await owner.authority._drain(SessionRef(owner.authority.profile_id, sid))
         assert owner.authority.db.get_session(sid)['end_reason'] == 'kanban_attempt_terminal'
+        assert [(e['session_id'], e['platform'], e['reason']) for e in events] == [
+            (sid, 'cli', 'kanban_attempt_terminal')]
+        await owner.authority._drain(SessionRef(owner.authority.profile_id, sid))
+        assert len(events) == 1
     finally:
+        for process in processes:
+            if not process.stdin.closed:
+                process.stdin.close()
+            await asyncio.to_thread(process.wait, timeout=5)
         await owner.close()
 
 

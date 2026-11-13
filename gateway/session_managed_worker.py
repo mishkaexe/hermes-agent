@@ -742,5 +742,13 @@ async def execute_managed(authority, ref, row, policy):
         # committed unknown row deliberately pauses every accepted follower.
         raise ManagedExecutionUnknown('managed_worker_unknown') from exc
     finally:
-        workers.pop(ref.session_id, None)
-        await asyncio.to_thread(worker.close)
+        # Retain the exact holder until its physical cleanup thread unwinds, even if
+        # the waiter is cancelled. A vanished waiter is not a close receipt.
+        from gateway.session_runtime_workers import track_mutation
+        async def cleanup():
+            try:
+                await asyncio.to_thread(worker.close)
+            finally:
+                if workers.get(ref.session_id) is worker:
+                    workers.pop(ref.session_id, None)
+        await asyncio.shield(track_mutation(authority, cleanup()))

@@ -36,9 +36,11 @@ jobs:
           tests/agent/test_turn_finalizer_cleanup_guard.py
           tests/agent/test_turn_finalizer_final_response_persistence.py
           tests/gateway/test_kanban_session_finalize.py
+          tests/gateway/test_managed_worker_cleanup_holder.py
           tests/gateway/test_kanban_finite_admission.py
           tests/gateway/test_worker_admission_reservation.py
           tests/gateway/test_managed_worker_fencing.py
+          tests/hermes_state/test_runtime_worker_children.py
       - name: Check source health
         env:
           HERMES_PYTHON: ${{ steps.pm.outputs.python-path }}
